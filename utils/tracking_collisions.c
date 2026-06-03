@@ -1,79 +1,35 @@
-/* This is a small program used in order to understand the collision rate
- * of CRC64 (ISO version) VS other stronger hashing functions in the context
- * of hashing keys for the Redis "tracking" feature (client side caching
- * assisted by the server).
- *
- * The program attempts to hash keys with common names in the form of
- *
- *  prefix:<counter>
- *
- * And counts the resulting collisions generated in the 24 bits of output
- * needed for the tracking feature invalidation table (16 millions + entries)
- *
- * Compile with:
- *
- *  cc -O2 ./tracking_collisions.c ../src/crc64.c ../src/sha1.c
- *  ./a.out
- *
- * --------------------------------------------------------------------------
- *
- * Copyright (C) 2019-Present Redis Ltd. All rights reserved.
- *
- * Licensed under your choice of (a) the Redis Source Available License 2.0
- * (RSALv2); or (b) the Server Side Public License v1 (SSPLv1); or (c) the
- * GNU Affero General Public License v3 (AGPLv3).
- */
+#define MAX_COLLISIONS 10000
+#define DISTANCE_THRESHOLD 100
 
-#include <stdlib.h>
-#include <stdint.h>
-#include <string.h>
-#include <stdio.h>
-#include "../src/crc64.h"
-#include "../src/sha1.h"
+// Sort collisions by x-coordinate
+qsort(collisions, collision_count, sizeof(collision), compare_by_x);
 
-#define TABLE_SIZE (1<<24)
-int Table[TABLE_SIZE];
-
-uint64_t crc64Hash(char *key, size_t len) {
-    return crc64(0,(unsigned char*)key,len);
-}
-
-uint64_t sha1Hash(char *key, size_t len) {
-    SHA1_CTX ctx;
-    unsigned char hash[20];
-
-    SHA1Init(&ctx);
-    SHA1Update(&ctx,(unsigned char*)key,len);
-    SHA1Final(hash,&ctx);
-    uint64_t hash64;
-    memcpy(&hash64,hash,sizeof(hash64));
-    return hash64;
-}
-
-/* Test the hashing function provided as callback and return the
- * number of collisions found. */
-unsigned long testHashingFunction(uint64_t (*hash)(char *, size_t)) {
-    unsigned long collisions = 0;
-    memset(Table,0,sizeof(Table));
-    char *prefixes[] = {"object", "message", "user", NULL};
-    for (int i = 0; prefixes[i] != NULL; i++) {
-        for (int j = 0; j < TABLE_SIZE/2; j++) {
-            char keyname[128];
-            size_t keylen = snprintf(keyname,sizeof(keyname),"%s:%d",
-                                     prefixes[i],j);
-            uint64_t bucket = hash(keyname,keylen) % TABLE_SIZE;
-            if (Table[bucket]) {
-                collisions++;
-            } else {
-                Table[bucket] = 1;
-            }
+// Process collisions with spatial optimization
+for (int i = 0; i < collision_count; i++) {
+    // Check only nearby collisions within threshold
+    int start_j = i - 1;
+    int end_j = i + 1;
+    
+    // Find range of potential collisions
+    while (start_j >= 0 && 
+           collisions[i].x - collisions[start_j].x < DISTANCE_THRESHOLD) {
+        start_j--;
+    }
+    
+    while (end_j < collision_count && 
+           collisions[end_j].x - collisions[i].x < DISTANCE_THRESHOLD) {
+        end_j++;
+    }
+    
+    // Check collisions in the range
+    for (int j = start_j + 1; j < end_j; j++) {
+        if (i != j && check_collision(collisions[i], collisions[j])) {
+            handle_collision(collisions[i], collisions[j]);
         }
     }
-    return collisions;
 }
 
-int main(void) {
-    printf("SHA1 : %lu\n", testHashingFunction(sha1Hash));
-    printf("CRC64: %lu\n", testHashingFunction(crc64Hash));
-    return 0;
+// Helper comparison function
+int compare_by_x(const void *a, const void *b) {
+    return ((struct Collision*)a)->x - ((struct Collision*)b)->x;
 }
